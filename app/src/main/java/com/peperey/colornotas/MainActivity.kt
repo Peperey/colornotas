@@ -31,13 +31,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -109,6 +114,16 @@ fun cargarNotas(context: Context): List<Nota> {
     }.getOrElse { emptyList() }
 }
 
+// La clave de Groq se guarda solo en el teléfono
+fun guardarClave(context: Context, clave: String) {
+    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+        .putString("groq_key", clave)
+        .apply()
+}
+
+fun cargarClave(context: Context): String =
+    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("groq_key", "") ?: ""
+
 @Composable
 fun ColorNotasApp() {
     val context = LocalContext.current
@@ -116,6 +131,7 @@ fun ColorNotasApp() {
     var editando by remember { mutableStateOf<Nota?>(null) }
     var esNueva by remember { mutableStateOf(false) }
     var busqueda by remember { mutableStateOf("") }
+    var clave by remember { mutableStateOf(cargarClave(context)) }
 
     fun guardarTodo() {
         guardarNotas(context, notas.toList())
@@ -137,6 +153,7 @@ fun ColorNotasApp() {
         EditorNota(
             nota = actual,
             esNueva = esNueva,
+            clave = clave,
             onGuardar = {
                 guardar(it)
                 editando = null
@@ -160,6 +177,9 @@ fun ColorNotasApp() {
             visibles = visibles,
             busqueda = busqueda,
             onBusqueda = { busqueda = it },
+            clave = clave,
+            onClave = { clave = it },
+            onGuardarClave = { guardarClave(context, clave.trim()) },
             onNueva = {
                 esNueva = true
                 editando = Nota(System.currentTimeMillis(), "", "", 0, 0L)
@@ -177,6 +197,9 @@ fun ListaNotas(
     visibles: List<Nota>,
     busqueda: String,
     onBusqueda: (String) -> Unit,
+    clave: String,
+    onClave: (String) -> Unit,
+    onGuardarClave: () -> Unit,
     onNueva: () -> Unit,
     onAbrir: (Nota) -> Unit
 ) {
@@ -192,6 +215,21 @@ fun ListaNotas(
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
+        OutlinedTextField(
+            value = clave,
+            onValueChange = onClave,
+            label = { Text("Clave de Groq (para corregir)") },
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedButton(
+            onClick = onGuardarClave,
+            enabled = clave.isNotBlank(),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Guardar clave")
+        }
         Button(onClick = onNueva, modifier = Modifier.fillMaxWidth()) {
             Text("Nueva nota")
         }
@@ -239,16 +277,21 @@ fun ListaNotas(
 fun EditorNota(
     nota: Nota,
     esNueva: Boolean,
+    clave: String,
     onGuardar: (Nota) -> Unit,
     onBorrar: () -> Unit,
     onCancelar: () -> Unit
 ) {
     // El botón atrás del teléfono cancela la edición
     BackHandler { onCancelar() }
+    val scope = rememberCoroutineScope()
 
     var titulo by remember(nota.id) { mutableStateOf(nota.titulo) }
     var texto by remember(nota.id) { mutableStateOf(nota.texto) }
     var color by remember(nota.id) { mutableStateOf(nota.color) }
+    var corrigiendo by remember(nota.id) { mutableStateOf(false) }
+    var propuesta by remember(nota.id) { mutableStateOf<Correccion?>(null) }
+    var mensaje by remember(nota.id) { mutableStateOf("") }
 
     Column(
         modifier = Modifier.fillMaxSize().padding(16.dp),
@@ -269,7 +312,7 @@ fun EditorNota(
             value = texto,
             onValueChange = { texto = it },
             label = { Text("Nota") },
-            minLines = 8,
+            minLines = 6,
             modifier = Modifier.fillMaxWidth()
         )
         Text("Color", style = MaterialTheme.typography.titleSmall)
@@ -285,6 +328,82 @@ fun EditorNota(
                 )
             }
         }
+
+        Button(
+            onClick = {
+                corrigiendo = true
+                mensaje = "Corrigiendo..."
+                propuesta = null
+                scope.launch {
+                    try {
+                        val c = withContext(Dispatchers.IO) {
+                            corregirConGroq(clave.trim(), titulo, texto)
+                        }
+                        propuesta = c
+                        mensaje = if (c.titulo == titulo && c.texto == texto) {
+                            "No se encontraron errores"
+                        } else {
+                            "Revisa la corrección antes de usarla"
+                        }
+                    } catch (e: Exception) {
+                        mensaje = "Error: ${e.message ?: "desconocido"}"
+                    } finally {
+                        corrigiendo = false
+                    }
+                }
+            },
+            enabled = !corrigiendo && clave.isNotBlank() && texto.isNotBlank(),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Corregir ortografía con IA")
+        }
+        if (clave.isBlank()) {
+            Text(
+                "Pon la clave de Groq en la pantalla principal para usar la corrección.",
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+        if (mensaje.isNotBlank()) {
+            Text(mensaje, style = MaterialTheme.typography.bodySmall)
+        }
+        propuesta?.let { c ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFFF5F5F5))
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text("Corrección", style = MaterialTheme.typography.titleSmall)
+                if (c.titulo.isNotBlank()) {
+                    Text(c.titulo, style = MaterialTheme.typography.titleMedium)
+                }
+                Text(c.texto, style = MaterialTheme.typography.bodyMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = {
+                            titulo = c.titulo
+                            texto = c.texto
+                            propuesta = null
+                            mensaje = "Corrección aplicada"
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Usar")
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            propuesta = null
+                            mensaje = "Corrección descartada"
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Descartar")
+                    }
+                }
+            }
+        }
+
         Row(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.fillMaxWidth()
