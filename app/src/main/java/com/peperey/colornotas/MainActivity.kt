@@ -1,10 +1,17 @@
 package com.peperey.colornotas
 
+import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.os.Bundle
+import android.speech.RecognizerIntent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -36,6 +43,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -43,6 +51,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import android.widget.Toast
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -297,7 +306,7 @@ fun ListaNotas(
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
                                 (if (n.fijada) "📌 " else "") + n.titulo.ifBlank { "Sin título" },
@@ -334,6 +343,7 @@ fun EditorNota(
 ) {
     // El botón atrás del teléfono cancela la edición
     BackHandler { onCancelar() }
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val scroll = rememberScrollState()
 
@@ -344,6 +354,49 @@ fun EditorNota(
     var corrigiendo by remember(nota.id) { mutableStateOf(false) }
     var propuesta by remember(nota.id) { mutableStateOf<Correccion?>(null) }
     var mensaje by remember(nota.id) { mutableStateOf("") }
+
+    // Recibe el texto que el reconocedor de voz ha entendido y lo añade al final de la nota
+    val lanzarDictado = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { resultado ->
+        val dicho = resultado.data
+            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+        if (!dicho.isNullOrBlank()) {
+            texto = if (texto.isBlank()) dicho else texto.trimEnd() + " " + dicho
+            mensaje = "Dictado añadido"
+        }
+    }
+
+    fun dictar() {
+        val intento = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "es-ES")
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Dicta la nota")
+        }
+        try {
+            lanzarDictado.launch(intento)
+        } catch (e: ActivityNotFoundException) {
+            mensaje = "Este teléfono no tiene reconocimiento de voz"
+        }
+    }
+
+    fun copiarNota() {
+        val portapapeles = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        portapapeles.setPrimaryClip(
+            ClipData.newPlainText("nota", "${titulo.trim()}\n\n${texto.trim()}")
+        )
+        Toast.makeText(context, "Nota copiada", Toast.LENGTH_SHORT).show()
+    }
+
+    fun compartirNota() {
+        val envio = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, titulo.trim())
+            putExtra(Intent.EXTRA_TEXT, "${titulo.trim()}\n\n${texto.trim()}")
+        }
+        context.startActivity(Intent.createChooser(envio, "Compartir nota"))
+    }
 
     Column(
         modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(scroll),
@@ -367,6 +420,20 @@ fun EditorNota(
             minLines = 6,
             modifier = Modifier.fillMaxWidth()
         )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            OutlinedButton(onClick = { dictar() }, modifier = Modifier.weight(1f)) {
+                Text("Dictar")
+            }
+            OutlinedButton(onClick = { copiarNota() }, modifier = Modifier.weight(1f)) {
+                Text("Copiar")
+            }
+            OutlinedButton(onClick = { compartirNota() }, modifier = Modifier.weight(1f)) {
+                Text("Compartir")
+            }
+        }
         Text("Color", style = MaterialTheme.typography.titleSmall)
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             PALETA.forEachIndexed { i, c ->
