@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.speech.RecognizerIntent
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -51,7 +52,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import android.widget.Toast
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -353,6 +353,8 @@ fun EditorNota(
     var fijada by remember(nota.id) { mutableStateOf(nota.fijada) }
     var corrigiendo by remember(nota.id) { mutableStateOf(false) }
     var propuesta by remember(nota.id) { mutableStateOf<Correccion?>(null) }
+    // Texto tal como estaba antes de corregir, para comparar con la corrección
+    var original by remember(nota.id) { mutableStateOf(Pair(nota.titulo, nota.texto)) }
     var mensaje by remember(nota.id) { mutableStateOf("") }
 
     // Recibe el texto que el reconocedor de voz ha entendido y lo añade al final de la nota
@@ -456,6 +458,7 @@ fun EditorNota(
 
         Button(
             onClick = {
+                original = Pair(titulo, texto)
                 corrigiendo = true
                 mensaje = "Corrigiendo..."
                 propuesta = null
@@ -468,7 +471,7 @@ fun EditorNota(
                         mensaje = if (c.titulo == titulo && c.texto == texto) {
                             "No se encontraron errores"
                         } else {
-                            "Revisa la corrección antes de usarla"
+                            "Revisa los cambios antes de usarlos"
                         }
                     } catch (e: Exception) {
                         mensaje = "Error: ${e.message ?: "desconocido"}"
@@ -499,11 +502,15 @@ fun EditorNota(
                     .padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Text("Corrección", style = MaterialTheme.typography.titleSmall)
+                Text("Cambios propuestos", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "Rojo tachado: se borra. Verde en negrita: se añade.",
+                    style = MaterialTheme.typography.bodySmall
+                )
                 if (c.titulo.isNotBlank()) {
-                    Text(c.titulo, style = MaterialTheme.typography.titleMedium)
+                    VistaDiferencias(original.first, c.titulo)
                 }
-                Text(c.texto, style = MaterialTheme.typography.bodyMedium)
+                VistaDiferencias(original.second, c.texto)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
                         onClick = {
