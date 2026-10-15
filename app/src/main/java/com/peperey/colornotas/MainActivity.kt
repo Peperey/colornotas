@@ -65,7 +65,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             MaterialTheme(colorScheme = lightColorScheme()) {
-                ColorNotasApp()
+                ColorNotasApp(intent)
             }
         }
     }
@@ -161,7 +161,7 @@ fun cargarClave(context: Context): String =
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("groq_key", "") ?: ""
 
 @Composable
-fun ColorNotasApp() {
+fun ColorNotasApp(entrada: Intent? = null) {
     val context = LocalContext.current
     val notas = remember { mutableStateListOf<Nota>().apply { addAll(cargarNotas(context)) } }
     var editando by remember { mutableStateOf<Nota?>(null) }
@@ -169,6 +169,7 @@ fun ColorNotasApp() {
     var busqueda by remember { mutableStateOf("") }
     var clave by remember { mutableStateOf(cargarClave(context)) }
     var orden by remember { mutableStateOf(Orden.FECHA) }
+    AbrirDesdeCompartir(entrada) { n -> esNueva = true; editando = n }
 
     fun guardarTodo() {
         guardarNotas(context, notas.toList())
