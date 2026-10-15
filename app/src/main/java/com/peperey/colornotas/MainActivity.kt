@@ -16,13 +16,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -71,12 +72,19 @@ val PALETA = listOf(
 
 fun colorDe(indice: Int): Color = PALETA.getOrElse(indice) { PALETA[0] }
 
+enum class Orden(val etiqueta: String) {
+    FECHA("Fecha"),
+    TITULO("Título"),
+    COLOR("Color")
+}
+
 data class Nota(
     val id: Long,
     val titulo: String,
     val texto: String,
     val color: Int,
-    val fecha: Long
+    val fecha: Long,
+    val fijada: Boolean = false
 )
 
 private const val PREFS = "colornotas_prefs"
@@ -91,6 +99,7 @@ fun guardarNotas(context: Context, notas: List<Nota>) {
                 .put("texto", n.texto)
                 .put("color", n.color)
                 .put("fecha", n.fecha)
+                .put("fijada", n.fijada)
         )
     }
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
@@ -110,7 +119,8 @@ fun cargarNotas(context: Context): List<Nota> {
                 titulo = o.getString("titulo"),
                 texto = o.getString("texto"),
                 color = o.getInt("color"),
-                fecha = o.getLong("fecha")
+                fecha = o.getLong("fecha"),
+                fijada = o.optBoolean("fijada", false)
             )
         }
     }.getOrElse { emptyList() }
@@ -134,6 +144,7 @@ fun ColorNotasApp() {
     var esNueva by remember { mutableStateOf(false) }
     var busqueda by remember { mutableStateOf("") }
     var clave by remember { mutableStateOf(cargarClave(context)) }
+    var orden by remember { mutableStateOf(Orden.FECHA) }
 
     fun guardarTodo() {
         guardarNotas(context, notas.toList())
@@ -147,6 +158,12 @@ fun ColorNotasApp() {
 
     fun borrar(id: Long) {
         notas.removeAll { it.id == id }
+        guardarTodo()
+    }
+
+    fun alternarFijada(id: Long) {
+        val idx = notas.indexOfFirst { it.id == id }
+        if (idx >= 0) notas[idx] = notas[idx].copy(fijada = !notas[idx].fijada)
         guardarTodo()
     }
 
@@ -167,18 +184,25 @@ fun ColorNotasApp() {
             onCancelar = { editando = null }
         )
     } else {
-        val visibles = notas
-            .filter { n ->
-                busqueda.isBlank() ||
-                    n.titulo.contains(busqueda, ignoreCase = true) ||
-                    n.texto.contains(busqueda, ignoreCase = true)
-            }
-            .sortedByDescending { it.fecha }
+        val filtradas = notas.filter { n ->
+            busqueda.isBlank() ||
+                n.titulo.contains(busqueda, ignoreCase = true) ||
+                n.texto.contains(busqueda, ignoreCase = true)
+        }
+        val ordenadas = when (orden) {
+            Orden.FECHA -> filtradas.sortedByDescending { it.fecha }
+            Orden.TITULO -> filtradas.sortedBy { it.titulo.lowercase() }
+            Orden.COLOR -> filtradas.sortedBy { it.color }
+        }
+        // Las fijadas van primero; sortedByDescending es estable, así que conserva el orden elegido
+        val visibles = ordenadas.sortedByDescending { it.fijada }
 
         ListaNotas(
             visibles = visibles,
             busqueda = busqueda,
             onBusqueda = { busqueda = it },
+            orden = orden,
+            onOrden = { orden = it },
             clave = clave,
             onClave = { clave = it },
             onGuardarClave = { guardarClave(context, clave.trim()) },
@@ -189,7 +213,8 @@ fun ColorNotasApp() {
             onAbrir = { n ->
                 esNueva = false
                 editando = n
-            }
+            },
+            onFijar = { alternarFijada(it) }
         )
     }
 }
@@ -199,11 +224,14 @@ fun ListaNotas(
     visibles: List<Nota>,
     busqueda: String,
     onBusqueda: (String) -> Unit,
+    orden: Orden,
+    onOrden: (Orden) -> Unit,
     clave: String,
     onClave: (String) -> Unit,
     onGuardarClave: () -> Unit,
     onNueva: () -> Unit,
-    onAbrir: (Nota) -> Unit
+    onAbrir: (Nota) -> Unit,
+    onFijar: (Long) -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxSize().padding(16.dp),
@@ -217,6 +245,16 @@ fun ListaNotas(
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
+        Text("Ordenar por", style = MaterialTheme.typography.titleSmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Orden.entries.forEach { o ->
+                FilterChip(
+                    selected = o == orden,
+                    onClick = { onOrden(o) },
+                    label = { Text(o.etiqueta) }
+                )
+            }
+        }
         OutlinedTextField(
             value = clave,
             onValueChange = onClave,
@@ -255,11 +293,21 @@ fun ListaNotas(
                         .clickable { onAbrir(n) }
                         .padding(12.dp)
                 ) {
-                    Column {
-                        Text(
-                            n.titulo.ifBlank { "Sin título" },
-                            style = MaterialTheme.typography.titleMedium
-                        )
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                        ) {
+                            Text(
+                                (if (n.fijada) "📌 " else "") + n.titulo.ifBlank { "Sin título" },
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedButton(onClick = { onFijar(n.id) }) {
+                                Text(if (n.fijada) "Quitar" else "Fijar")
+                            }
+                        }
                         if (n.texto.isNotBlank()) {
                             Text(
                                 n.texto,
@@ -287,14 +335,15 @@ fun EditorNota(
     // El botón atrás del teléfono cancela la edición
     BackHandler { onCancelar() }
     val scope = rememberCoroutineScope()
+    val scroll = rememberScrollState()
 
     var titulo by remember(nota.id) { mutableStateOf(nota.titulo) }
     var texto by remember(nota.id) { mutableStateOf(nota.texto) }
     var color by remember(nota.id) { mutableStateOf(nota.color) }
+    var fijada by remember(nota.id) { mutableStateOf(nota.fijada) }
     var corrigiendo by remember(nota.id) { mutableStateOf(false) }
     var propuesta by remember(nota.id) { mutableStateOf<Correccion?>(null) }
     var mensaje by remember(nota.id) { mutableStateOf("") }
-    val scroll = rememberScrollState()
 
     Column(
         modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(scroll),
@@ -330,6 +379,12 @@ fun EditorNota(
                         .clickable { color = i }
                 )
             }
+        }
+        OutlinedButton(
+            onClick = { fijada = !fijada },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(if (fijada) "Quitar de arriba" else "Fijar arriba")
         }
 
         Button(
@@ -423,7 +478,8 @@ fun EditorNota(
                                 titulo = titulo.trim(),
                                 texto = texto.trim(),
                                 color = color,
-                                fecha = System.currentTimeMillis()
+                                fecha = System.currentTimeMillis(),
+                                fijada = fijada
                             )
                         )
                     }
