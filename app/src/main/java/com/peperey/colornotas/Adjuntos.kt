@@ -8,11 +8,11 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import android.view.DragAndDropPermissions
 import android.view.DragEvent
-import android.view.Gravity
 import android.webkit.MimeTypeMap
-import android.widget.TextView
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -22,15 +22,20 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import java.io.File
 import java.util.UUID
 
@@ -77,44 +82,45 @@ fun cargarMiniatura(context: Context, a: Adjunto): Bitmap? {
     return BitmapFactory.decodeFile(f.path, BitmapFactory.Options().apply { inSampleSize = muestra })
 }
 
-// Zona donde se pueden soltar imágenes o archivos arrastrados desde otra app
+// Mientras el editor está abierto, cualquier archivo soltado sobre la ventana se adjunta a la nota
 @Composable
 fun ZonaArrastre(onSoltar: (List<Uri>, DragAndDropPermissions?) -> Unit) {
-    AndroidView(
-        modifier = Modifier.fillMaxWidth().height(90.dp),
-        factory = { ctx ->
-            TextView(ctx).apply {
-                text = "Arrastra aquí imágenes o archivos desde otra app"
-                gravity = Gravity.CENTER
-                setPadding(24, 24, 24, 24)
-                setBackgroundColor(android.graphics.Color.parseColor("#EEEEEE"))
-                setOnDragListener { v, evento ->
-                    when (evento.action) {
-                        DragEvent.ACTION_DRAG_STARTED -> evento.clipDescription != null
-                        DragEvent.ACTION_DRAG_ENTERED -> {
-                            setBackgroundColor(android.graphics.Color.parseColor("#C5CAE9"))
-                            true
-                        }
-                        DragEvent.ACTION_DRAG_EXITED, DragEvent.ACTION_DRAG_ENDED -> {
-                            setBackgroundColor(android.graphics.Color.parseColor("#EEEEEE"))
-                            true
-                        }
-                        DragEvent.ACTION_DROP -> {
-                            // Pide permiso temporal para leer los archivos que se han soltado
-                            val permisos = (ctx as? Activity)?.requestDragAndDropPermissions(evento)
-                            val uris = evento.clipData?.let { cd ->
-                                (0 until cd.itemCount).mapNotNull { cd.getItemAt(it).uri }
-                            } ?: emptyList()
-                            setBackgroundColor(android.graphics.Color.parseColor("#EEEEEE"))
-                            onSoltar(uris, permisos)
-                            true
-                        }
-                        else -> true
-                    }
+    val context = LocalContext.current
+    val alSoltar by rememberUpdatedState(onSoltar)
+
+    DisposableEffect(Unit) {
+        val actividad = context as? Activity
+        val raiz = actividad?.window?.decorView
+        raiz?.setOnDragListener { _, evento ->
+            when (evento.action) {
+                DragEvent.ACTION_DRAG_STARTED -> evento.clipDescription != null
+                DragEvent.ACTION_DROP -> {
+                    val permisos = actividad.requestDragAndDropPermissions(evento)
+                    val uris = evento.clipData?.let { cd ->
+                        (0 until cd.itemCount).mapNotNull { cd.getItemAt(it).uri }
+                    } ?: emptyList()
+                    alSoltar(uris, permisos)
+                    true
                 }
+                else -> true
             }
         }
-    )
+        onDispose { raiz?.setOnDragListener(null) }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(90.dp)
+            .background(Color(0xFFEEEEEE)),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            "Arrastra aquí imágenes o archivos desde otra app",
+            textAlign = TextAlign.Center,
+            color = Color(0xFF757575)
+        )
+    }
 }
 
 // Una fila por adjunto: miniatura si es imagen, icono si es otro archivo
