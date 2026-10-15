@@ -5,8 +5,10 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.speech.RecognizerIntent
+import android.view.DragAndDropPermissions
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -93,7 +95,8 @@ data class Nota(
     val texto: String,
     val color: Int,
     val fecha: Long,
-    val fijada: Boolean = false
+    val fijada: Boolean = false,
+    val adjuntos: List<Adjunto> = emptyList()
 )
 
 private const val PREFS = "colornotas_prefs"
@@ -101,6 +104,10 @@ private const val PREFS = "colornotas_prefs"
 fun guardarNotas(context: Context, notas: List<Nota>) {
     val array = JSONArray()
     notas.forEach { n ->
+        val adjuntos = JSONArray()
+        n.adjuntos.forEach { a ->
+            adjuntos.put(JSONObject().put("archivo", a.archivo).put("nombre", a.nombre))
+        }
         array.put(
             JSONObject()
                 .put("id", n.id)
@@ -109,6 +116,7 @@ fun guardarNotas(context: Context, notas: List<Nota>) {
                 .put("color", n.color)
                 .put("fecha", n.fecha)
                 .put("fijada", n.fijada)
+                .put("adjuntos", adjuntos)
         )
     }
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
@@ -123,13 +131,20 @@ fun cargarNotas(context: Context): List<Nota> {
         val array = JSONArray(texto)
         (0 until array.length()).map { i ->
             val o = array.getJSONObject(i)
+            val listaAdjuntos = o.optJSONArray("adjuntos")?.let { ja ->
+                (0 until ja.length()).map { k ->
+                    val ad = ja.getJSONObject(k)
+                    Adjunto(ad.getString("archivo"), ad.getString("nombre"))
+                }
+            } ?: emptyList()
             Nota(
                 id = o.getLong("id"),
                 titulo = o.getString("titulo"),
                 texto = o.getString("texto"),
                 color = o.getInt("color"),
                 fecha = o.getLong("fecha"),
-                fijada = o.optBoolean("fijada", false)
+                fijada = o.optBoolean("fijada", false),
+                adjuntos = listaAdjuntos
             )
         }
     }.getOrElse { emptyList() }
@@ -166,6 +181,8 @@ fun ColorNotasApp() {
     }
 
     fun borrar(id: Long) {
+        // Al borrar la nota también se borran sus archivos adjuntos
+        notas.firstOrNull { it.id == id }?.adjuntos?.forEach { borrarAdjunto(context, it) }
         notas.removeAll { it.id == id }
         guardarTodo()
     }
@@ -325,6 +342,12 @@ fun ListaNotas(
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
+                        if (n.adjuntos.isNotEmpty()) {
+                            Text(
+                                "📎 ${n.adjuntos.size}",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
                     }
                 }
             }
@@ -351,11 +374,26 @@ fun EditorNota(
     var texto by remember(nota.id) { mutableStateOf(nota.texto) }
     var color by remember(nota.id) { mutableStateOf(nota.color) }
     var fijada by remember(nota.id) { mutableStateOf(nota.fijada) }
+    var adjuntos by remember(nota.id) { mutableStateOf(nota.adjuntos) }
     var corrigiendo by remember(nota.id) { mutableStateOf(false) }
     var propuesta by remember(nota.id) { mutableStateOf<Correccion?>(null) }
     // Texto tal como estaba antes de corregir, para comparar con la corrección
     var original by remember(nota.id) { mutableStateOf(Pair(nota.titulo, nota.texto)) }
     var mensaje by remember(nota.id) { mutableStateOf("") }
+
+    // Copia los archivos a la carpeta privada en segundo plano y los añade a la nota
+    fun adjuntarAsync(uris: List<Uri>, permisos: DragAndDropPermissions?) {
+        if (uris.isEmpty()) return
+        scope.launch {
+            val nuevos = withContext(Dispatchers.IO) {
+                uris.mapNotNull { copiarAdjunto(context, it) }
+            }
+            // Libera el permiso del arrastre cuando ya se han copiado los archivos
+            permisos?.release()
+            adjuntos = adjuntos + nuevos
+            mensaje = if (nuevos.isEmpty()) "No se pudo adjuntar" else "Adjuntado: ${nuevos.size}"
+        }
+    }
 
     // Recibe el texto que el reconocedor de voz ha entendido y lo añade al final de la nota
     val lanzarDictado = rememberLauncherForActivityResult(
@@ -369,6 +407,10 @@ fun EditorNota(
             mensaje = "Dictado añadido"
         }
     }
+
+    val lanzarArchivos = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris -> adjuntarAsync(uris, null) }
 
     fun dictar() {
         val intento = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -436,6 +478,26 @@ fun EditorNota(
                 Text("Compartir")
             }
         }
+
+        Text("Adjuntos", style = MaterialTheme.typography.titleSmall)
+        OutlinedButton(
+            onClick = { lanzarArchivos.launch(arrayOf("*/*")) },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Añadir imagen o archivo")
+        }
+        ZonaArrastre(onSoltar = { uris, permisos -> adjuntarAsync(uris, permisos) })
+        adjuntos.forEach { a ->
+            AdjuntoFila(
+                context = context,
+                a = a,
+                onQuitar = {
+                    borrarAdjunto(context, a)
+                    adjuntos = adjuntos - a
+                }
+            )
+        }
+
         Text("Color", style = MaterialTheme.typography.titleSmall)
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             PALETA.forEachIndexed { i, c ->
@@ -542,7 +604,7 @@ fun EditorNota(
         ) {
             Button(
                 onClick = {
-                    if (titulo.isBlank() && texto.isBlank()) {
+                    if (titulo.isBlank() && texto.isBlank() && adjuntos.isEmpty()) {
                         // Una nota vacía no se guarda
                         onBorrar()
                     } else {
@@ -553,7 +615,8 @@ fun EditorNota(
                                 texto = texto.trim(),
                                 color = color,
                                 fecha = System.currentTimeMillis(),
-                                fijada = fijada
+                                fijada = fijada,
+                                adjuntos = adjuntos
                             )
                         )
                     }
