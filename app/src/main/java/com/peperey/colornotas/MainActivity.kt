@@ -15,6 +15,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -24,6 +25,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -50,6 +52,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -89,39 +93,125 @@ enum class Orden(val etiqueta: String) {
     COLOR("Color")
 }
 
+// Cada parte de una nota: un trozo de texto, o un archivo (imagen o documento) en su posición
+sealed class Bloque {
+    data class Texto(val valor: String) : Bloque()
+    data class Archivo(val adjunto: Adjunto) : Bloque()
+}
+
 data class Nota(
     val id: Long,
     val titulo: String,
-    val texto: String,
     val color: Int,
     val fecha: Long,
     val fijada: Boolean = false,
-    val adjuntos: List<Adjunto> = emptyList()
+    val bloques: List<Bloque> = listOf(Bloque.Texto(""))
 )
+
+// Texto de la nota sin imágenes, para buscar, mostrar en la lista y copiar
+fun textoPlano(bloques: List<Bloque>): String =
+    bloques.filterIsInstance<Bloque.Texto>()
+        .map { it.valor }
+        .filter { it.isNotBlank() }
+        .joinToString("\n")
+
+// Añade texto al final: si el último bloque ya es texto, continúa en ese mismo bloque
+fun anadirTexto(bloques: List<Bloque>, s: String): List<Bloque> {
+    val res = bloques.toMutableList()
+    val ult = res.lastOrNull()
+    if (ult is Bloque.Texto) {
+        res[res.lastIndex] = Bloque.Texto(if (ult.valor.isBlank()) s else ult.valor.trimEnd() + " " + s)
+    } else {
+        res.add(Bloque.Texto(s))
+    }
+    return res
+}
+
+// Añade archivos al final, seguidos de un bloque de texto para seguir escribiendo debajo
+fun anadirAdjuntos(bloques: List<Bloque>, nuevos: List<Adjunto>): List<Bloque> {
+    if (nuevos.isEmpty()) return bloques
+    val res = bloques.toMutableList()
+    nuevos.forEach { res.add(Bloque.Archivo(it)) }
+    if (res.lastOrNull() !is Bloque.Texto) res.add(Bloque.Texto(""))
+    return res
+}
+
+// Quita espacios sobrantes y elimina los bloques de texto vacíos
+fun limpiarBloques(bloques: List<Bloque>): List<Bloque> =
+    bloques.map { b -> if (b is Bloque.Texto) Bloque.Texto(b.valor.trim()) else b }
+        .filter { !(it is Bloque.Texto && it.valor.isEmpty()) }
+
+// Corrige cada bloque de texto por separado, para que las imágenes conserven su posición
+fun corregirBloques(clave: String, titulo: String, bloques: List<Bloque>): Pair<String, List<Bloque>> {
+    var tituloRes = titulo
+    var primero = true
+    val res = bloques.map { b: Bloque ->
+        if (b is Bloque.Texto && b.valor.isNotBlank()) {
+            val c = corregirConGroq(clave, if (primero) titulo else "", b.valor)
+            if (primero) tituloRes = c.titulo
+            primero = false
+            Bloque.Texto(c.texto) as Bloque
+        } else {
+            b
+        }
+    }
+    return Pair(tituloRes, res)
+}
 
 private const val PREFS = "colornotas_prefs"
 
 fun guardarNotas(context: Context, notas: List<Nota>) {
     val array = JSONArray()
     notas.forEach { n ->
-        val adjuntos = JSONArray()
-        n.adjuntos.forEach { a ->
-            adjuntos.put(JSONObject().put("archivo", a.archivo).put("nombre", a.nombre))
+        val bl = JSONArray()
+        n.bloques.forEach { b ->
+            val o = JSONObject()
+            when (b) {
+                is Bloque.Texto -> o.put("tipo", "texto").put("valor", b.valor)
+                is Bloque.Archivo -> o.put("tipo", "archivo")
+                    .put("archivo", b.adjunto.archivo)
+                    .put("nombre", b.adjunto.nombre)
+            }
+            bl.put(o)
         }
         array.put(
             JSONObject()
                 .put("id", n.id)
                 .put("titulo", n.titulo)
-                .put("texto", n.texto)
                 .put("color", n.color)
                 .put("fecha", n.fecha)
                 .put("fijada", n.fijada)
-                .put("adjuntos", adjuntos)
+                .put("bloques", bl)
         )
     }
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
         .putString("notas", array.toString())
         .apply()
+}
+
+// Lee los bloques de una nota. Las notas anteriores (texto y adjuntos sueltos) se convierten aquí.
+fun leerBloques(o: JSONObject): List<Bloque> {
+    val lista = mutableListOf<Bloque>()
+    val arr = o.optJSONArray("bloques")
+    if (arr != null) {
+        for (k in 0 until arr.length()) {
+            val b = arr.getJSONObject(k)
+            if (b.optString("tipo") == "archivo") {
+                lista.add(Bloque.Archivo(Adjunto(b.getString("archivo"), b.getString("nombre"))))
+            } else {
+                lista.add(Bloque.Texto(b.optString("valor", "")))
+            }
+        }
+    } else {
+        lista.add(Bloque.Texto(o.optString("texto", "")))
+        o.optJSONArray("adjuntos")?.let { ja ->
+            for (k in 0 until ja.length()) {
+                val ad = ja.getJSONObject(k)
+                lista.add(Bloque.Archivo(Adjunto(ad.getString("archivo"), ad.getString("nombre"))))
+            }
+        }
+    }
+    return lista
 }
 
 fun cargarNotas(context: Context): List<Nota> {
@@ -131,20 +221,13 @@ fun cargarNotas(context: Context): List<Nota> {
         val array = JSONArray(texto)
         (0 until array.length()).map { i ->
             val o = array.getJSONObject(i)
-            val listaAdjuntos = o.optJSONArray("adjuntos")?.let { ja ->
-                (0 until ja.length()).map { k ->
-                    val ad = ja.getJSONObject(k)
-                    Adjunto(ad.getString("archivo"), ad.getString("nombre"))
-                }
-            } ?: emptyList()
             Nota(
                 id = o.getLong("id"),
                 titulo = o.getString("titulo"),
-                texto = o.getString("texto"),
                 color = o.getInt("color"),
                 fecha = o.getLong("fecha"),
                 fijada = o.optBoolean("fijada", false),
-                adjuntos = listaAdjuntos
+                bloques = leerBloques(o)
             )
         }
     }.getOrElse { emptyList() }
@@ -169,7 +252,11 @@ fun ColorNotasApp(entrada: Intent? = null) {
     var busqueda by remember { mutableStateOf("") }
     var clave by remember { mutableStateOf(cargarClave(context)) }
     var orden by remember { mutableStateOf(Orden.FECHA) }
-    AbrirDesdeCompartir(entrada) { n -> esNueva = true; editando = n }
+
+    AbrirDesdeCompartir(entrada) { n ->
+        esNueva = true
+        editando = n
+    }
 
     fun guardarTodo() {
         guardarNotas(context, notas.toList())
@@ -182,8 +269,10 @@ fun ColorNotasApp(entrada: Intent? = null) {
     }
 
     fun borrar(id: Long) {
-        // Al borrar la nota también se borran sus archivos adjuntos
-        notas.firstOrNull { it.id == id }?.adjuntos?.forEach { borrarAdjunto(context, it) }
+        // Al borrar la nota también se borran sus archivos
+        notas.firstOrNull { it.id == id }?.bloques?.forEach { b ->
+            if (b is Bloque.Archivo) borrarAdjunto(context, b.adjunto)
+        }
         notas.removeAll { it.id == id }
         guardarTodo()
     }
@@ -214,7 +303,7 @@ fun ColorNotasApp(entrada: Intent? = null) {
         val filtradas = notas.filter { n ->
             busqueda.isBlank() ||
                 n.titulo.contains(busqueda, ignoreCase = true) ||
-                n.texto.contains(busqueda, ignoreCase = true)
+                textoPlano(n.bloques).contains(busqueda, ignoreCase = true)
         }
         val ordenadas = when (orden) {
             Orden.FECHA -> filtradas.sortedByDescending { it.fecha }
@@ -235,7 +324,7 @@ fun ColorNotasApp(entrada: Intent? = null) {
             onGuardarClave = { guardarClave(context, clave.trim()) },
             onNueva = {
                 esNueva = true
-                editando = Nota(System.currentTimeMillis(), "", "", 0, 0L)
+                editando = Nota(System.currentTimeMillis(), "", 0, 0L)
             },
             onAbrir = { n ->
                 esNueva = false
@@ -312,6 +401,8 @@ fun ListaNotas(
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             items(visibles, key = { it.id }) { n ->
+                val texto = textoPlano(n.bloques)
+                val numArchivos = n.bloques.count { it is Bloque.Archivo }
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -335,23 +426,47 @@ fun ListaNotas(
                                 Text(if (n.fijada) "Quitar" else "Fijar")
                             }
                         }
-                        if (n.texto.isNotBlank()) {
+                        if (texto.isNotBlank()) {
                             Text(
-                                n.texto,
+                                texto,
                                 style = MaterialTheme.typography.bodyMedium,
                                 maxLines = 3,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
-                        if (n.adjuntos.isNotEmpty()) {
+                        if (numArchivos > 0) {
                             Text(
-                                "📎 ${n.adjuntos.size}",
+                                "📎 $numArchivos",
                                 style = MaterialTheme.typography.bodySmall
                             )
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+// Imagen dentro de la nota, a tamaño completo, con botón para quitarla
+@Composable
+fun ImagenEnNota(context: Context, a: Adjunto, onQuitar: () -> Unit) {
+    val imagen = remember(a.archivo) { cargarMiniatura(context, a)?.asImageBitmap() }
+    Column(
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        if (imagen != null) {
+            Image(
+                bitmap = imagen,
+                contentDescription = a.nombre,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxWidth().height(240.dp).clip(RoundedCornerShape(8.dp))
+            )
+        } else {
+            Text("No se pudo mostrar ${a.nombre}", style = MaterialTheme.typography.bodySmall)
+        }
+        OutlinedButton(onClick = onQuitar) {
+            Text("Quitar imagen")
         }
     }
 }
@@ -372,17 +487,29 @@ fun EditorNota(
     val scroll = rememberScrollState()
 
     var titulo by remember(nota.id) { mutableStateOf(nota.titulo) }
-    var texto by remember(nota.id) { mutableStateOf(nota.texto) }
     var color by remember(nota.id) { mutableStateOf(nota.color) }
     var fijada by remember(nota.id) { mutableStateOf(nota.fijada) }
-    var adjuntos by remember(nota.id) { mutableStateOf(nota.adjuntos) }
+    var bloques by remember(nota.id) {
+        mutableStateOf<List<Bloque>>(nota.bloques.ifEmpty { listOf(Bloque.Texto("")) })
+    }
     var corrigiendo by remember(nota.id) { mutableStateOf(false) }
-    var propuesta by remember(nota.id) { mutableStateOf<Correccion?>(null) }
-    // Texto tal como estaba antes de corregir, para comparar con la corrección
-    var original by remember(nota.id) { mutableStateOf(Pair(nota.titulo, nota.texto)) }
+    var originalTitulo by remember(nota.id) { mutableStateOf("") }
+    var originalBloques by remember(nota.id) { mutableStateOf<List<Bloque>>(emptyList()) }
+    var propuestaTitulo by remember(nota.id) { mutableStateOf<String?>(null) }
+    var propuestaBloques by remember(nota.id) { mutableStateOf<List<Bloque>?>(null) }
     var mensaje by remember(nota.id) { mutableStateOf("") }
 
-    // Copia los archivos a la carpeta privada en segundo plano y los añade a la nota
+    fun cambiarTexto(i: Int, valor: String) {
+        bloques = bloques.toMutableList().also { it[i] = Bloque.Texto(valor) }
+    }
+
+    fun quitarBloque(i: Int) {
+        val b = bloques[i]
+        if (b is Bloque.Archivo) borrarAdjunto(context, b.adjunto)
+        bloques = bloques.toMutableList().also { it.removeAt(i) }.ifEmpty { listOf(Bloque.Texto("")) }
+    }
+
+    // Copia los archivos a la carpeta privada en segundo plano y los inserta en la nota
     fun adjuntarAsync(uris: List<Uri>, permisos: DragAndDropPermissions?) {
         if (uris.isEmpty()) return
         scope.launch {
@@ -391,7 +518,7 @@ fun EditorNota(
             }
             // Libera el permiso del arrastre cuando ya se han copiado los archivos
             permisos?.release()
-            adjuntos = adjuntos + nuevos
+            bloques = anadirAdjuntos(bloques, nuevos)
             mensaje = if (nuevos.isEmpty()) "No se pudo adjuntar" else "Adjuntado: ${nuevos.size}"
         }
     }
@@ -404,7 +531,7 @@ fun EditorNota(
             ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
             ?.firstOrNull()
         if (!dicho.isNullOrBlank()) {
-            texto = if (texto.isBlank()) dicho else texto.trimEnd() + " " + dicho
+            bloques = anadirTexto(bloques, dicho)
             mensaje = "Dictado añadido"
         }
     }
@@ -429,7 +556,7 @@ fun EditorNota(
     fun copiarNota() {
         val portapapeles = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         portapapeles.setPrimaryClip(
-            ClipData.newPlainText("nota", "${titulo.trim()}\n\n${texto.trim()}")
+            ClipData.newPlainText("nota", "${titulo.trim()}\n\n${textoPlano(bloques)}")
         )
         Toast.makeText(context, "Nota copiada", Toast.LENGTH_SHORT).show()
     }
@@ -438,7 +565,7 @@ fun EditorNota(
         val envio = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_SUBJECT, titulo.trim())
-            putExtra(Intent.EXTRA_TEXT, "${titulo.trim()}\n\n${texto.trim()}")
+            putExtra(Intent.EXTRA_TEXT, "${titulo.trim()}\n\n${textoPlano(bloques)}")
         }
         context.startActivity(Intent.createChooser(envio, "Compartir nota"))
     }
@@ -458,13 +585,27 @@ fun EditorNota(
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
-        OutlinedTextField(
-            value = texto,
-            onValueChange = { texto = it },
-            label = { Text("Nota") },
-            minLines = 6,
-            modifier = Modifier.fillMaxWidth()
-        )
+
+        // Contenido de la nota: texto e imágenes en el orden en que están en la nota
+        bloques.forEachIndexed { i, b ->
+            when (b) {
+                is Bloque.Texto -> OutlinedTextField(
+                    value = b.valor,
+                    onValueChange = { cambiarTexto(i, it) },
+                    label = { Text("Nota") },
+                    minLines = 3,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                is Bloque.Archivo -> {
+                    if (esImagen(b.adjunto)) {
+                        ImagenEnNota(context, b.adjunto) { quitarBloque(i) }
+                    } else {
+                        AdjuntoFila(context, b.adjunto) { quitarBloque(i) }
+                    }
+                }
+            }
+        }
+
         Row(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.fillMaxWidth()
@@ -480,24 +621,13 @@ fun EditorNota(
             }
         }
 
-        Text("Adjuntos", style = MaterialTheme.typography.titleSmall)
         OutlinedButton(
             onClick = { lanzarArchivos.launch(arrayOf("*/*")) },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Añadir imagen o archivo")
+            Text("Insertar imagen o archivo al final")
         }
         ZonaArrastre(onSoltar = { uris, permisos -> adjuntarAsync(uris, permisos) })
-        adjuntos.forEach { a ->
-            AdjuntoFila(
-                context = context,
-                a = a,
-                onQuitar = {
-                    borrarAdjunto(context, a)
-                    adjuntos = adjuntos - a
-                }
-            )
-        }
 
         Text("Color", style = MaterialTheme.typography.titleSmall)
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -521,21 +651,24 @@ fun EditorNota(
 
         Button(
             onClick = {
-                original = Pair(titulo, texto)
+                val t = titulo
+                val bl = bloques
+                originalTitulo = t
+                originalBloques = bl
                 corrigiendo = true
                 mensaje = "Corrigiendo..."
-                propuesta = null
+                propuestaTitulo = null
+                propuestaBloques = null
                 scope.launch {
                     try {
-                        val c = withContext(Dispatchers.IO) {
-                            corregirConGroq(clave.trim(), titulo, texto)
+                        val (tituloNuevo, bloquesNuevos) = withContext(Dispatchers.IO) {
+                            corregirBloques(clave.trim(), t, bl)
                         }
-                        propuesta = c
-                        mensaje = if (c.titulo == titulo && c.texto == texto) {
-                            "No se encontraron errores"
-                        } else {
-                            "Revisa los cambios antes de usarlos"
-                        }
+                        propuestaTitulo = tituloNuevo
+                        propuestaBloques = bloquesNuevos
+                        val hayCambios = tituloNuevo != t || bloquesNuevos != bl
+                        mensaje = if (hayCambios) "Revisa los cambios antes de usarlos"
+                        else "No se encontraron errores"
                     } catch (e: Exception) {
                         mensaje = "Error: ${e.message ?: "desconocido"}"
                     } finally {
@@ -543,7 +676,7 @@ fun EditorNota(
                     }
                 }
             },
-            enabled = !corrigiendo && clave.isNotBlank() && texto.isNotBlank(),
+            enabled = !corrigiendo && clave.isNotBlank() && textoPlano(bloques).isNotBlank(),
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("Corregir ortografía con IA")
@@ -557,7 +690,8 @@ fun EditorNota(
         if (mensaje.isNotBlank()) {
             Text(mensaje, style = MaterialTheme.typography.bodySmall)
         }
-        propuesta?.let { c ->
+
+        propuestaBloques?.let { pb ->
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -570,16 +704,22 @@ fun EditorNota(
                     "Rojo tachado: se borra. Verde en negrita: se añade.",
                     style = MaterialTheme.typography.bodySmall
                 )
-                if (c.titulo.isNotBlank()) {
-                    VistaDiferencias(original.first, c.titulo)
+                propuestaTitulo?.let { pt ->
+                    if (pt != originalTitulo) VistaDiferencias(originalTitulo, pt)
                 }
-                VistaDiferencias(original.second, c.texto)
+                originalBloques.forEachIndexed { i, ob ->
+                    val nb = pb.getOrNull(i)
+                    if (ob is Bloque.Texto && nb is Bloque.Texto && ob.valor != nb.valor) {
+                        VistaDiferencias(ob.valor, nb.valor)
+                    }
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
                         onClick = {
-                            titulo = c.titulo
-                            texto = c.texto
-                            propuesta = null
+                            propuestaTitulo?.let { titulo = it }
+                            propuestaBloques?.let { bloques = it }
+                            propuestaTitulo = null
+                            propuestaBloques = null
                             mensaje = "Corrección aplicada"
                         },
                         modifier = Modifier.weight(1f)
@@ -588,7 +728,8 @@ fun EditorNota(
                     }
                     OutlinedButton(
                         onClick = {
-                            propuesta = null
+                            propuestaTitulo = null
+                            propuestaBloques = null
                             mensaje = "Corrección descartada"
                         },
                         modifier = Modifier.weight(1f)
@@ -605,7 +746,9 @@ fun EditorNota(
         ) {
             Button(
                 onClick = {
-                    if (titulo.isBlank() && texto.isBlank() && adjuntos.isEmpty()) {
+                    val sinContenido = titulo.isBlank() &&
+                        bloques.all { it is Bloque.Texto && it.valor.isBlank() }
+                    if (sinContenido) {
                         // Una nota vacía no se guarda
                         onBorrar()
                     } else {
@@ -613,11 +756,10 @@ fun EditorNota(
                             Nota(
                                 id = nota.id,
                                 titulo = titulo.trim(),
-                                texto = texto.trim(),
                                 color = color,
                                 fecha = System.currentTimeMillis(),
                                 fijada = fijada,
-                                adjuntos = adjuntos
+                                bloques = limpiarBloques(bloques)
                             )
                         )
                     }

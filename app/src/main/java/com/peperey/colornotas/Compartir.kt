@@ -26,7 +26,7 @@ private fun uriUnica(intent: Intent): Uri? =
 private fun uriMultiples(intent: Intent): List<Uri> =
     intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.toList() ?: emptyList()
 
-// Si la app se abrió desde Compartir, crea una nota nueva con los archivos recibidos
+// Si la app se abrió desde Compartir, crea una nota nueva con las imágenes recibidas dentro
 @Composable
 fun AbrirDesdeCompartir(entrada: Intent?, onAbrir: (Nota) -> Unit) {
     val context = LocalContext.current
@@ -39,14 +39,16 @@ fun AbrirDesdeCompartir(entrada: Intent?, onAbrir: (Nota) -> Unit) {
             uris.mapNotNull { copiarAdjunto(context, it) }
         }
         if (adjuntos.isNotEmpty()) {
+            val bloques = mutableListOf<Bloque>()
+            adjuntos.forEach { bloques.add(Bloque.Archivo(it)) }
+            bloques.add(Bloque.Texto(""))
             onAbrir(
                 Nota(
                     id = System.currentTimeMillis(),
                     titulo = "",
-                    texto = "",
                     color = 0,
                     fecha = 0L,
-                    adjuntos = adjuntos
+                    bloques = bloques
                 )
             )
         }
